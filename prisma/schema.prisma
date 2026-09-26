@@ -1,0 +1,259 @@
+// Dessert Shop Manager — database schema.
+//
+// Two conventions used throughout:
+//   * Money is stored as whole dirhams (100 dirham = 1 Libyan dinar). Never floats.
+//   * Ingredient quantities are stored as whole thousandths of the ingredient's
+//     unit ("milli-units"), so 2.5 kg of flour is 2500 when the unit is KG.
+//     Dessert quantities are plain whole pieces.
+// See src/lib/units.ts for the conversion helpers.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// The shop owner. There is normally exactly one.
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime @default(now())
+}
+
+enum Unit {
+  KG
+  G
+  L
+  ML
+  PIECE
+}
+
+enum PurchaseCategory {
+  INGREDIENTS
+  EQUIPMENT
+  PACKAGING
+  RENT
+  UTILITIES
+  TRANSPORT
+  SALARIES
+  OTHER
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CARD
+  CHEQUE
+  CREDIT
+}
+
+/// Why a stock level changed. Every change is recorded, never overwritten.
+enum StockReason {
+  PURCHASE
+  PRODUCTION_INPUT
+  PRODUCTION_OUTPUT
+  SALE
+  ADJUSTMENT
+  WASTE
+}
+
+model Supplier {
+  id        String     @id @default(cuid())
+  name      String
+  phone     String?
+  notes     String?
+  createdAt DateTime   @default(now())
+  purchases Purchase[]
+
+  @@index([name])
+}
+
+/// Something the shop bought. This is the evidence the loan application is built from.
+model Purchase {
+  id            String           @id @default(cuid())
+  date          DateTime
+  supplierId    String?
+  supplier      Supplier?        @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  /// Free-text vendor name, for when the supplier is not worth saving.
+  supplierName  String?
+  category      PurchaseCategory
+  paymentMethod PaymentMethod    @default(CASH)
+  /// Total on the receipt, in dirhams. Authoritative — items are optional detail.
+  totalDirhams  Int
+  notes         String?
+  /// Whether this purchase belongs in the loan report.
+  forLoan       Boolean          @default(true)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  items         PurchaseItem[]
+  receipts      Receipt[]
+  stockLogs     StockLog[]
+
+  @@index([date])
+  @@index([forLoan, date])
+}
+
+model PurchaseItem {
+  id               String      @id @default(cuid())
+  purchaseId       String
+  purchase         Purchase    @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  description      String
+  /// Milli-units of the linked ingredient's unit, or plain count when unlinked.
+  quantity         Int
+  unitPriceDirhams Int
+  /// Linking an item to an ingredient is what makes the purchase add to stock.
+  ingredientId     String?
+  ingredient       Ingredient? @relation(fields: [ingredientId], references: [id], onDelete: SetNull)
+
+  @@index([purchaseId])
+  @@index([ingredientId])
+}
+
+/// A photo of the paper receipt, stored in the database so there is no file
+/// storage to configure. Images are shrunk in the browser before upload.
+model Receipt {
+  id         String   @id @default(cuid())
+  purchaseId String
+  purchase   Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  data       Bytes
+  mimeType   String
+  fileName   String?
+  sizeBytes  Int
+  uploadedAt DateTime @default(now())
+
+  @@index([purchaseId])
+}
+
+/// A raw material: flour, sugar, pistachio...
+model Ingredient {
+  id            String         @id @default(cuid())
+  name          String         @unique
+  unit          Unit
+  /// Warn when stock falls below this, in milli-units.
+  reorderLevel  Int            @default(0)
+  createdAt     DateTime       @default(now())
+  purchaseItems PurchaseItem[]
+  recipeLines   RecipeLine[]
+  stockLogs     StockLog[]
+
+  @@index([name])
+}
+
+/// A finished product that gets sold.
+model Dessert {
+  id            String       @id @default(cuid())
+  name          String       @unique
+  /// Selling price of one piece, in dirhams.
+  priceDirhams  Int
+  /// Warn when fewer than this many pieces are left.
+  reorderLevel  Int          @default(0)
+  active        Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  recipeLines   RecipeLine[]
+  saleLines     SaleLine[]
+  productions   Production[]
+  stockLogs     StockLog[]
+
+  @@index([name])
+}
+
+/// One ingredient in a dessert's recipe: how much is used per single piece.
+model RecipeLine {
+  id           String     @id @default(cuid())
+  dessertId    String
+  dessert      Dessert    @relation(fields: [dessertId], references: [id], onDelete: Cascade)
+  ingredientId String
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  /// Milli-units of the ingredient used to make one piece of the dessert.
+  quantity     Int
+
+  @@unique([dessertId, ingredientId])
+  @@index([ingredientId])
+}
+
+/// A baking run: ingredients go down, finished desserts go up.
+model Production {
+  id        String     @id @default(cuid())
+  date      DateTime
+  dessertId String
+  dessert   Dessert    @relation(fields: [dessertId], references: [id], onDelete: Cascade)
+  /// Pieces made.
+  quantity  Int
+  notes     String?
+  createdAt DateTime   @default(now())
+  stockLogs StockLog[]
+
+  @@index([date])
+}
+
+model Sale {
+  id        String     @id @default(cuid())
+  date      DateTime
+  notes     String?
+  createdAt DateTime   @default(now())
+  lines     SaleLine[]
+  stockLogs StockLog[]
+
+  @@index([date])
+}
+
+model SaleLine {
+  id               String  @id @default(cuid())
+  saleId           String
+  sale             Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  dessertId        String
+  dessert          Dessert @relation(fields: [dessertId], references: [id], onDelete: Restrict)
+  /// Pieces sold.
+  quantity         Int
+  /// Price charged per piece at the time of sale, in dirhams.
+  unitPriceDirhams Int
+
+  @@index([saleId])
+  @@index([dessertId])
+}
+
+/// The full history of stock changes. Current stock is the sum of `delta` for an
+/// item, so every number on the inventory screen can be traced to what caused it.
+/// Exactly one of `ingredientId` / `dessertId` is set.
+model StockLog {
+  id           String      @id @default(cuid())
+  at           DateTime    @default(now())
+  ingredientId String?
+  ingredient   Ingredient? @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  dessertId    String?
+  dessert      Dessert?    @relation(fields: [dessertId], references: [id], onDelete: Cascade)
+  /// Positive adds stock, negative removes it. Milli-units for ingredients,
+  /// pieces for desserts.
+  delta        Int
+  reason       StockReason
+  note         String?
+  purchaseId   String?
+  purchase     Purchase?   @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  productionId String?
+  production   Production? @relation(fields: [productionId], references: [id], onDelete: Cascade)
+  saleId       String?
+  sale         Sale?       @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  @@index([ingredientId, at])
+  @@index([dessertId, at])
+}
+
+/// A read-only link handed to the loan officer. Exposes loan purchases only.
+model ShareLink {
+  id        String    @id @default(cuid())
+  token     String    @unique
+  label     String?
+  /// Optional date range the link is limited to.
+  fromDate  DateTime?
+  toDate    DateTime?
+  expiresAt DateTime?
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  viewCount Int       @default(0)
+  lastViewedAt DateTime?
+}
